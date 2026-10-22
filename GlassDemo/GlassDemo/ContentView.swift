@@ -19,6 +19,8 @@ struct ContentView: View {
     @State private var isGlassesOutput = false
     @State private var speech = SpeechPlayer()
     @State private var cameraModel = CameraModel()
+    @State private var call: RealtimeCall?
+    @State private var outputKind = ""
 
     private var isRegistered: Bool { registrationState == .registered }
 
@@ -30,6 +32,8 @@ struct ContentView: View {
                 .frame(maxHeight: .infinity)
 
             controls
+
+            callRow
 
             logLines
         }
@@ -51,6 +55,9 @@ struct ContentView: View {
             speech.onSpeaking = { cameraModel.isSpeaking = $0 }
             cameraModel.log = addLog
             cameraModel.speak = speech.speak
+            let call = RealtimeCall(camera: cameraModel)
+            call.log = addLog
+            self.call = call
             let session = AVAudioSession.sharedInstance()
             do {
                 // 재생 전용. .playAndRecord/HFP 금지 (A2DP가 끊기고 모노 16kHz로 떨어짐)
@@ -108,7 +115,7 @@ struct ContentView: View {
             decisionBanner
 
             HStack {
-                Label(isGlassesOutput ? "Output: Glasses" : "Output: iPhone speaker",
+                Label(isGlassesOutput ? "Output: Glasses\(outputKind)" : "Output: iPhone speaker",
                       systemImage: isGlassesOutput ? "eyeglasses" : "iphone")
                     .font(.headline)
                     .foregroundStyle(isGlassesOutput ? .green : .orange)
@@ -162,6 +169,9 @@ struct ContentView: View {
     private var decisionBanner: some View {
         let speaking = cameraModel.isSpeaking
         let (icon, title, subtitle): (String, String, String) = {
+            if cameraModel.callActive {
+                return ("phone.fill", "CALL MODE", "local voice muted — logged only")
+            }
             switch cameraModel.decision {
             case .speak(let sentence):
                 return speaking ? ("speaker.wave.3.fill", "SPEAKING", "“\(sentence)”") : ("speaker.slash.fill", "SILENT", "last: “\(sentence)”")
@@ -239,6 +249,33 @@ struct ContentView: View {
         .controlSize(.large)
     }
 
+    // MARK: - 통화 (OpenAI Realtime)
+
+    private var callRow: some View {
+        let state = call?.state ?? .idle
+        return HStack(spacing: 10) {
+            Button {
+                Task { await call?.toggle() }
+            } label: {
+                Label(state == .idle ? "Start talk" : "End talk",
+                      systemImage: state == .idle ? "mic.fill" : "phone.down.fill")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(state == .idle ? .purple : .red)
+            .disabled(state == .connecting)
+            .font(.body.weight(.semibold))
+            .controlSize(.large)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(state.rawValue).font(.subheadline.bold())
+                Text("In: \(call?.inputDevice ?? "–")").font(.caption2).lineLimit(1)
+                Text("Out: \(call?.outputDevice ?? "–")").font(.caption2).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     // MARK: - 하단 로그
 
     private var logLines: some View {
@@ -258,7 +295,9 @@ struct ContentView: View {
 
     private func updateRoute() {
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
-        isGlassesOutput = outputs.contains { $0.portType == .bluetoothA2DP }
+        // 선제 개입 모드는 A2DP, 통화 모드는 HFP로 글래스에 나간다
+        isGlassesOutput = outputs.contains { $0.portType == .bluetoothA2DP || $0.portType == .bluetoothHFP }
+        outputKind = outputs.contains { $0.portType == .bluetoothHFP } ? " (HFP)" : ""
         addLog("route: \(outputs.map { "\($0.portName)(\($0.portType.rawValue))" })")
     }
 

@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		04CFDFFF18E75B719734855F /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 9630730C8E0AAB953061B0B2 /* WebRTC */; };
 		88E433CD3089B6F30072F371 /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; productRef = 88E433CC3089B6F30072F371 /* MWDATCore */; };
 		88E433CF3089B6FA0072F371 /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; productRef = 88E433CE3089B6FA0072F371 /* MWDATCamera */; };
 /* End PBXBuildFile section */
@@ -58,6 +59,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				88E433CD3089B6F30072F371 /* MWDATCore in Frameworks */,
+				04CFDFFF18E75B719734855F /* WebRTC in Frameworks */,
 				88E433CF3089B6FA0072F371 /* MWDATCamera in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -129,6 +131,7 @@
 			packageProductDependencies = (
 				88E433CC3089B6F30072F371 /* MWDATCore */,
 				88E433CE3089B6FA0072F371 /* MWDATCamera */,
+				9630730C8E0AAB953061B0B2 /* WebRTC */,
 			);
 			productName = GlassDemo;
 			productReference = 88E4339E3089A8910072F371 /* GlassDemo.app */;
@@ -214,6 +217,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				88E433CA3089AEEB0072F371 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
+				5C7CF8B37EEBF6A1A26A91E9 /* XCRemoteSwiftPackageReference "WebRTC" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 88E4339F3089A8910072F371 /* Products */;
@@ -592,6 +596,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		5C7CF8B37EEBF6A1A26A91E9 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC";
+			requirement = {
+				kind = exactVersion;
+				version = 154.0.0;
+			};
+		};
 		88E433CA3089AEEB0072F371 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
@@ -612,6 +624,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 88E433CA3089AEEB0072F371 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
 			productName = MWDATCamera;
+		};
+		9630730C8E0AAB953061B0B2 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5C7CF8B37EEBF6A1A26A91E9 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

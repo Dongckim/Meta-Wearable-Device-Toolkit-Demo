@@ -92,6 +92,8 @@
 	<array>
 		<string>com.meta.ar.wearable</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Talk to the voice assistant through the glasses microphone</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Needed to connect to Meta Wearables</string>
 	<key>NSLocalNetworkUsageDescription</key>

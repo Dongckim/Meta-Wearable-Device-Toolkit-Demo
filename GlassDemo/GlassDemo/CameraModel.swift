@@ -42,6 +42,10 @@ final class CameraModel {
     var sessionState: DeviceSessionState?
     var streamState: StreamState?
     var endedOnGlasses = false
+    /// 통화 모드 중에는 선제 개입 음성을 재생하지 않는다(판단과 CSV 기록은 그대로).
+    var callActive = false
+    /// 가장 최근에 처리된 프레임의 최상위 결과. Realtime tool이 그대로 돌려준다.
+    @ObservationIgnored private(set) var latest: (label: String, confidence: Float, arrived: CFTimeInterval)?
 
     var log: (String) -> Void = { _ in }
     var speak: (String) -> Void = { _ in }
@@ -186,6 +190,7 @@ final class CameraModel {
         self.latencyMs = latencyMs
         let top = detections.max { $0.confidence < $1.confidence }
         let label = top?.label ?? "none"
+        latest = (label, top?.confidence ?? 0, arrived)
         if label == stableLabel { stableConfidence = top?.confidence }
 
         let now = CACurrentMediaTime()
@@ -202,7 +207,15 @@ final class CameraModel {
         MetricsCSV.shared.row("decision", t: now, detector: detector, label: label, confidence: top?.confidence,
                               latencyMs: (now - arrived) * 1000, detail: detail)
         report("\(label) → \(detail)")
-        if case .speak(let sentence) = decision { speak(sentence) }
+        if case .speak(let sentence) = decision {
+            if callActive {
+                // 말했어야 할 시점만 남긴다
+                MetricsCSV.shared.row("speech_suppressed", t: now, detector: detector, label: label, detail: "call active: \(sentence)")
+                report("(call active) would say: \(sentence)")
+            } else {
+                speak(sentence)
+            }
+        }
     }
 
     func report(_ text: String) {

@@ -4,3 +4,4 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 .swiftpm/
+Secrets.swift

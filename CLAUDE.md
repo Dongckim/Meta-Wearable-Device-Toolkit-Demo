@@ -6,6 +6,8 @@ Ray-Ban Meta 글래스로 절차 중 음성 개입을 실험하는 연구용 데
 - Meta Wearables DAT는 개발자 프리뷰다. API 이름과 시그니처는 기억으로 쓰지 말고
   매번 search_dat_docs로 확인한다. 확실하지 않으면 추측하지 말고 물어본다.
 - DAT iOS는 1.0.1로 고정(Exact Version). 임의로 올리지 않는다.
+- stasel/WebRTC는 154.0.0으로 고정(Exact Version). OpenAI API 키는 GlassDemo/GlassDemo/Secrets.swift(gitignore)에만 둔다.
+  템플릿은 GlassDemo/Secrets.swift.example.
 - Developer Mode로 동작한다. MetaAppID는 "0", ClientToken은 빈 문자열.
   Wearables Developer Center 계정은 쓰지 않는다.
 - App Store 배포는 하지 않는다(SDK가 ExternalAccessory 사용). Xcode 직접 설치 전용.
@@ -27,7 +29,7 @@ Ray-Ban Meta 글래스로 절차 중 음성 개입을 실험하는 연구용 데
 6.5 YOLO(Core ML)로 컵 인식   ← 완료
 7. 판단(로컬 규칙, Jev 안 씀) + 인식기 전환(QR↔CoreML) + 타임스탬프 기록   ← 완료
 8. A 세션 상태 표시(실행/일시정지/종료)   ← 완료
-   B OpenAI Realtime 음성 대화(화면 버튼, HFP)   ← 지금
+   B OpenAI Realtime 음성 대화(화면 버튼, HFP)   ← 구현됨, 실기기 대화 확인 대기
    C 더블탭(MWDATInputs .select)으로 대화 시작/종료 — B 실기기 확인 후에만
 
 한 단계 끝날 때마다 실기기에서 확인하고 커밋한다. 다음 단계로 먼저 넘어가지 않는다.
