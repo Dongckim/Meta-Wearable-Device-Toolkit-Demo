@@ -5,28 +5,25 @@
 //  Created by dongchankim on 10/21/26.
 //
 
+import MWDATCore
 import SwiftUI
-import SwiftData
 
 @main
 struct GlassDemoApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            Item.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+    private let configureError: String?
 
+    init() {
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            try Wearables.configure()
+            configureError = nil
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            configureError = "\(error)"
         }
-    }()
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(configureError: configureError)
         }
-        .modelContainer(sharedModelContainer)
     }
 }
