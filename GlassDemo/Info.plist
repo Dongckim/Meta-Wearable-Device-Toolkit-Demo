@@ -74,9 +74,23 @@
 		<string>$(DEVELOPMENT_TEAM)</string>
 	</dict>
 
+	<!-- Documents/metrics.csv 를 파일 앱에서 꺼내기 위함 -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+
 	<key>UIBackgroundModes</key>
 	<array>
+		<string>processing</string>
 		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+		<string>external-accessory</string>
+	</array>
+	<!-- 카메라 스트림은 Bluetooth Classic(ExternalAccessory) 경로를 쓴다 -->
+	<key>UISupportedExternalAccessoryProtocols</key>
+	<array>
+		<string>com.meta.ar.wearable</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Needed to connect to Meta Wearables</string>
