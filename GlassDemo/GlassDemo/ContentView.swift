@@ -8,6 +8,7 @@ import AVFoundation
 import MWDATCore
 import SwiftUI
 
+/// 데모 화면. 아이폰을 들고 보여 주므로 글자를 크게.
 struct ContentView: View {
     let configureError: String?
 
@@ -17,74 +18,22 @@ struct ContentView: View {
     @State private var isGlassesOutput = false
     @State private var speech = SpeechPlayer()
     @State private var cameraModel = CameraModel()
-    @State private var showCamera = false
+
+    private var isRegistered: Bool { registrationState == .registered }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            if let configureError {
-                Text("configure() 실패: \(configureError)")
-                    .foregroundStyle(.red)
-            }
+        VStack(spacing: 10) {
+            statusPanel
 
-            Text("등록 상태: \(registrationState.map { "\($0)" } ?? "-")")
+            CameraView(model: cameraModel, placeholder: isRegistered ? "Press Start demo" : "Connect your glasses first")
+                .frame(maxHeight: .infinity)
 
-            Button("연결하기") {
-                Task {
-                    addLog("startRegistration()")
-                    do {
-                        try await Wearables.shared.startRegistration()
-                    } catch {
-                        addLog("startRegistration 실패: \(error)")
-                    }
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(configureError != nil)
+            controls
 
-            Text("글래스").font(.headline)
-            if devices.isEmpty {
-                Text("없음").foregroundStyle(.secondary)
-            }
-            ForEach(devices, id: \.identifier) { device in
-                Text("\(device.nameOrId()) — \(device.deviceType().rawValue)")
-            }
-
-            Text(isGlassesOutput ? "출력: 글래스" : "출력: 아이폰 스피커")
-                .font(.largeTitle.bold())
-                .foregroundStyle(isGlassesOutput ? .green : .orange)
-
-            ForEach(["warn_before", "step_done", "after_error"], id: \.self) { name in
-                Button(name) { speech.play(name) }
-                    .buttonStyle(.bordered)
-            }
-
-            Button("카메라") {
-                Task {
-                    guard await cameraModel.ensurePermission() else { return }
-                    showCamera = true
-                    await cameraModel.start()
-                }
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(registrationState != .registered)
-
-            Spacer()
-
-            Text("이벤트 로그").font(.headline)
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(Array(log.enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.caption.monospaced())
-                }
-            }
+            logLines
         }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .fullScreenCover(isPresented: $showCamera) {
-            CameraView(model: cameraModel) {
-                cameraModel.stop()
-                showCamera = false
-            }
-        }
+        .padding(.horizontal)
+        .padding(.bottom, 6)
         .onOpenURL { url in
             addLog("onOpenURL: \(url)")
             Task {
@@ -92,20 +41,22 @@ struct ContentView: View {
                     let handled = try await Wearables.shared.handleUrl(url)
                     addLog("handleUrl → \(handled)")
                 } catch {
-                    addLog("handleUrl 실패: \(error)")
+                    addLog("handleUrl failed: \(error)")
                 }
             }
         }
         .task {
             speech.log = addLog
+            speech.onSpeaking = { cameraModel.isSpeaking = $0 }
             cameraModel.log = addLog
+            cameraModel.speak = speech.speak
             let session = AVAudioSession.sharedInstance()
             do {
                 // 재생 전용. .playAndRecord/HFP 금지 (A2DP가 끊기고 모노 16kHz로 떨어짐)
                 try session.setCategory(.playback)
                 try session.setActive(true)
             } catch {
-                addLog("AVAudioSession 설정 실패: \(error)")
+                addLog("AVAudioSession setup failed: \(error)")
             }
             updateRoute()
             for await _ in NotificationCenter.default.notifications(named: AVAudioSession.routeChangeNotification) {
@@ -116,7 +67,7 @@ struct ContentView: View {
             guard configureError == nil else { return }
             for await state in Wearables.shared.registrationStateStream() {
                 registrationState = state
-                addLog("registrationState: \(state)")
+                addLog("registrationState: \(state.description)")
             }
         }
         .task {
@@ -128,6 +79,151 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - 상단: 현재 인식 결과 / 현재 판단 / 오디오 출력
+
+    private var statusPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let configureError {
+                Label("configure() failed: \(configureError)", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
+
+            HStack(alignment: .firstTextBaseline) {
+                Text("SEES").font(.caption.bold()).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+                Text(seesText)
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(cameraModel.stableLabel.map { CameraView.color(for: $0) == .yellow ? .primary : CameraView.color(for: $0) } ?? .secondary)
+                Spacer()
+                Text(cameraModel.detectorKind.rawValue)
+                    .font(.caption.bold())
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.quaternary, in: Capsule())
+            }
+
+            decisionBanner
+
+            HStack {
+                Label(isGlassesOutput ? "Output: Glasses" : "Output: iPhone speaker",
+                      systemImage: isGlassesOutput ? "eyeglasses" : "iphone")
+                    .font(.headline)
+                    .foregroundStyle(isGlassesOutput ? .green : .orange)
+                Spacer()
+                Text(devices.first?.nameOrId() ?? "No glasses")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var seesText: String {
+        guard let label = cameraModel.stableLabel else { return "—" }
+        if label == "none" { return "Nothing" }
+        let conf = cameraModel.stableConfidence.map { String(format: " %.2f", $0) } ?? ""
+        return label + conf
+    }
+
+    /// 침묵이 데모의 절반이라, 말하지 않는 상태도 크게 분명하게 보여 준다.
+    private var decisionBanner: some View {
+        let speaking = cameraModel.isSpeaking
+        let (icon, title, subtitle): (String, String, String) = {
+            switch cameraModel.decision {
+            case .speak(let sentence):
+                return speaking ? ("speaker.wave.3.fill", "SPEAKING", "“\(sentence)”") : ("speaker.slash.fill", "SILENT", "last: “\(sentence)”")
+            case .silent(let reason):
+                return ("speaker.slash.fill", "SILENT", reason)
+            case nil:
+                return ("speaker.slash.fill", "SILENT", cameraModel.isRunning ? "waiting for a stable result" : "demo not running")
+            }
+        }()
+        return HStack(spacing: 12) {
+            Image(systemName: icon).font(.system(size: 34, weight: .semibold))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.title.bold())
+                Text(subtitle).font(.headline).lineLimit(1).minimumScaleFactor(0.7)
+            }
+            Spacer()
+        }
+        .foregroundStyle(speaking ? .white : .primary)
+        .padding(12)
+        .background(speaking ? Color.blue : Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 12))
+        .animation(.easeInOut(duration: 0.15), value: speaking)
+    }
+
+    // MARK: - 버튼
+
+    private var controls: some View {
+        HStack(spacing: 8) {
+            if isRegistered {
+                Button {
+                    if cameraModel.isRunning {
+                        cameraModel.stop()
+                    } else {
+                        Task {
+                            guard await cameraModel.ensurePermission() else { return }
+                            await cameraModel.start()
+                        }
+                    }
+                } label: {
+                    Label(cameraModel.isRunning ? "Stop demo" : "Start demo",
+                          systemImage: cameraModel.isRunning ? "stop.fill" : "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(cameraModel.isRunning ? .red : .blue)
+            } else {
+                Button {
+                    Task {
+                        addLog("startRegistration()")
+                        do {
+                            try await Wearables.shared.startRegistration()
+                        } catch {
+                            addLog("startRegistration failed: \(error)")
+                        }
+                    }
+                } label: {
+                    Label("Connect", systemImage: "link").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(configureError != nil)
+            }
+
+            Button { cameraModel.reset() } label: {
+                Label("Reset", systemImage: "arrow.counterclockwise")
+            }
+            .buttonStyle(.bordered)
+
+            Button { cameraModel.toggleDetector() } label: {
+                Label(cameraModel.detectorKind == .coreML ? "QR" : "ML", systemImage: "arrow.left.arrow.right")
+            }
+            .buttonStyle(.bordered)
+        }
+        .font(.body.weight(.semibold))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .controlSize(.large)
+    }
+
+    // MARK: - 하단 로그
+
+    private var logLines: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(log.suffix(4).enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.footnote.monospaced())
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 72, alignment: .topLeading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
+    }
+
     private func updateRoute() {
         let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
         isGlassesOutput = outputs.contains { $0.portType == .bluetoothA2DP }
@@ -136,7 +232,7 @@ struct ContentView: View {
 
     private func addLog(_ message: String) {
         let time = Date().formatted(date: .omitted, time: .standard)
-        log = Array((log + ["\(time) \(message)"]).suffix(10))
+        log = Array((log + ["\(time) \(message)"]).suffix(50))
     }
 }
 

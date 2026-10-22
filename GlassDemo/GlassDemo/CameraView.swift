@@ -5,9 +5,10 @@
 
 import SwiftUI
 
+/// 글래스 영상 + 인식 박스 + 구석의 fps / 인식 ms.
 struct CameraView: View {
     let model: CameraModel
-    let close: () -> Void
+    let placeholder: String
 
     var body: some View {
         GeometryReader { geo in
@@ -20,41 +21,54 @@ struct CameraView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
 
-                    ForEach(model.results) { qr in
-                        let rect = viewRect(normalized: qr.box, imageSize: image.size, viewSize: geo.size)
-                        let color: Color = qr.isQR ? .green : .orange
-                        Rectangle()
-                            .stroke(color, lineWidth: 3)
+                    ForEach(model.results) { item in
+                        let rect = viewRect(normalized: item.boundingBox, imageSize: image.size, viewSize: geo.size)
+                        let color = Self.color(for: item.label)
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(color, lineWidth: 4)
                             .frame(width: rect.width, height: rect.height)
                             .offset(x: rect.minX, y: rect.minY)
-                        Text("\(qr.value) \(qr.confidence, format: .number.precision(.fractionLength(2)))")
-                            .font(.caption.bold())
-                            .padding(2)
-                            .background(color)
+                        Text("\(item.label) \(item.confidence, format: .number.precision(.fractionLength(2)))")
+                            .font(.title3.monospaced().bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(color, in: RoundedRectangle(cornerRadius: 5))
                             .foregroundStyle(.black)
-                            .offset(x: rect.minX, y: max(rect.minY - 20, 0))
+                            .offset(x: rect.minX, y: max(rect.minY - 32, 0))
                     }
-                }
-
-                VStack(alignment: .leading) {
-                    Text("\(model.fps) fps")
-                    Text("인식 \(model.latencyMs.map { String(format: "%.1f", $0) } ?? "-") ms")
-                    ForEach(Array(model.messages.enumerated()), id: \.offset) { _, line in
-                        Text(line).font(.caption2).textSelection(.enabled)
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "eyeglasses")
+                            .font(.system(size: 52, weight: .light))
+                        Text(placeholder)
+                            .font(.title3)
                     }
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: geo.size.width, height: geo.size.height)
                 }
-                .font(.headline.monospaced())
-                .padding(8)
-                .background(.black.opacity(0.6))
-                .foregroundStyle(.white)
-                .padding(.top, geo.safeAreaInsets.top)
             }
-            .ignoresSafeArea()
+            .overlay(alignment: .bottomTrailing) { metricsBadge.padding(10) }
         }
-        .overlay(alignment: .topTrailing) {
-            Button("닫기", action: close)
-                .buttonStyle(.borderedProminent)
-                .padding()
+        .clipShape(RoundedRectangle(cornerRadius: 18))
+    }
+
+    static func color(for label: String) -> Color {
+        switch label {
+        case "cup": .green
+        case "bowl": .red
+        default: .yellow
         }
+    }
+
+    private var metricsBadge: some View {
+        VStack(alignment: .trailing, spacing: 2) {
+            Text("\(model.fps) fps")
+            Text("\(model.latencyMs.map { String(format: "%.0f", $0) } ?? "–") ms")
+        }
+        .font(.headline.monospaced())
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 10))
     }
 }
