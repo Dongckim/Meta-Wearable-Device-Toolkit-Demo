@@ -38,6 +38,10 @@ final class CameraModel {
     var stableConfidence: Float?
     var decision: DecisionEngine.Decision?
     var isSpeaking = false
+    /// 글래스 쪽 세션/스트림 상태. 안경다리 한 번 탭 = 일시정지/재개, 길게 누르기 = 세션 종료.
+    var sessionState: DeviceSessionState?
+    var streamState: StreamState?
+    var endedOnGlasses = false
 
     var log: (String) -> Void = { _ in }
     var speak: (String) -> Void = { _ in }
@@ -72,6 +76,7 @@ final class CameraModel {
             guard let deviceId = Wearables.shared.devices.first(where: {
                 Wearables.shared.deviceForIdentifier($0)?.linkState == .connected
             }) else { return report("No connected glasses (devices=\(Wearables.shared.devices.count))") }
+            endedOnGlasses = false
             let session = try Wearables.shared.createSession(deviceSelector: SpecificDeviceSelector(device: deviceId))
             self.session = session
             isRunning = true
@@ -98,6 +103,8 @@ final class CameraModel {
         camera = nil
         session = nil
         isRunning = false
+        sessionState = .stopped
+        streamState = nil
         image = nil
         results = []
         fps = 0
@@ -127,7 +134,9 @@ final class CameraModel {
     }
 
     private func sessionChanged(_ state: DeviceSessionState) {
-        report("session: \(state)")
+        report("session: \(state.description)")
+        sessionState = state
+        MetricsCSV.shared.row("session_state", t: CACurrentMediaTime(), label: state.description)
         switch state {
         case .started:
             guard camera == nil, let session else { return }  // pause 후 다시 started가 와도 한 번만
@@ -140,7 +149,7 @@ final class CameraModel {
                 let stream = camera.stream
                 let processor = processor
                 stream.statePublisher.listen { state in
-                    Task { @MainActor in self.report("stream: \(state)") }
+                    Task { @MainActor in self.streamChanged(state) }
                 }.store(in: tokens)
                 stream.errorPublisher.listen { error in
                     Task { @MainActor in self.report("stream error: \(error)") }
@@ -154,9 +163,21 @@ final class CameraModel {
             }
         case .stopped:
             camera = nil
+            // 우리가 stop()을 부르기 전에 끝났다면 글래스에서 끝낸 것(길게 누르기 등)
+            if isRunning {
+                endedOnGlasses = true
+                report("Session ended on the glasses")
+                stop()
+            }
         default:
             break
         }
+    }
+
+    private func streamChanged(_ state: StreamState) {
+        report("stream: \(state)")
+        streamState = state
+        MetricsCSV.shared.row("stream_state", t: CACurrentMediaTime(), label: "\(state)")
     }
 
     /// arrived = 이 결과를 만든 프레임의 도착 시각.

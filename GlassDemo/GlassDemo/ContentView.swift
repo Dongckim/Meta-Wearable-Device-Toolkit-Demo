@@ -5,6 +5,7 @@
 //  Created by dongchankim on 10/21/26.
 //
 import AVFoundation
+import MWDATCamera
 import MWDATCore
 import SwiftUI
 
@@ -83,6 +84,8 @@ struct ContentView: View {
 
     private var statusPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
+            sessionBanner
+
             if let configureError {
                 Label("configure() failed: \(configureError)", systemImage: "exclamationmark.triangle.fill")
                     .font(.footnote)
@@ -117,6 +120,35 @@ struct ContentView: View {
         }
         .padding(12)
         .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// 교수님이 안경을 고쳐 쓰다 안경다리를 건드려도 바로 알 수 있게 크게 보여 준다.
+    private var sessionBanner: some View {
+        let paused = cameraModel.sessionState == .paused || cameraModel.streamState == .paused
+        let (icon, title, hint, color): (String, String, String?, Color) = {
+            if paused { return ("pause.circle.fill", "PAUSED", "Tap the temple once to resume", .orange) }
+            switch cameraModel.sessionState {
+            case .started: return ("record.circle", "RUNNING", nil, .green)
+            case .starting: return ("hourglass", "STARTING", nil, .blue)
+            case .stopping: return ("stop.circle", "STOPPING", nil, .gray)
+            default:
+                return ("stop.circle.fill", "STOPPED",
+                        cameraModel.endedOnGlasses ? "Ended on the glasses — press Start demo" : nil, .gray)
+            }
+        }()
+        return HStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 30, weight: .semibold))
+            VStack(alignment: .leading, spacing: 0) {
+                Text(title).font(.title2.bold())
+                if let hint { Text(hint).font(.headline) }
+            }
+            Spacer()
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(color, in: RoundedRectangle(cornerRadius: 12))
+        .animation(.easeInOut(duration: 0.15), value: title)
     }
 
     private var seesText: String {
