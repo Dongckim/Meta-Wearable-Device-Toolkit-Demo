@@ -4,6 +4,7 @@
 //
 
 import CoreGraphics
+import CoreML
 import Foundation
 import MWDATCamera
 import MWDATCore
@@ -12,9 +13,10 @@ import QuartzCore
 import UIKit
 import Vision
 
-struct QRResult: Identifiable {
+struct Detection: Identifiable {
     let id = UUID()
-    let value: String
+    let isQR: Bool
+    let value: String  // QR 페이로드 또는 YOLO 라벨
     let confidence: Float
     let box: CGRect  // Vision 정규화 좌표 (좌하단 원점)
 }
@@ -32,7 +34,7 @@ func viewRect(normalized r: CGRect, imageSize: CGSize, viewSize: CGSize) -> CGRe
 @Observable
 final class CameraModel {
     var image: UIImage?
-    var results: [QRResult] = []
+    var results: [Detection] = []
     var fps = 0
     var latencyMs: Double?
     var messages: [String] = []
@@ -136,7 +138,7 @@ final class CameraModel {
     }
 }
 
-/// SDK 콜백 스레드에서 프레임을 받아 Vision 큐에서 QR 인식. MainActor 밖에서 동작.
+/// SDK 콜백 스레드에서 프레임을 받아 Vision 큐에서 QR + YOLO 인식. MainActor 밖에서 동작.
 nonisolated final class FrameProcessor: @unchecked Sendable {
     private weak var model: CameraModel?
     private let lock = NSLock()
@@ -145,9 +147,23 @@ nonisolated final class FrameProcessor: @unchecked Sendable {
     private var arrivals: [CFTimeInterval] = []
     private var loggedSize = false
     private let csv = MetricsCSV()
+    private let yolo: VNCoreMLRequest?
+    private static let yoloLabels: Set = ["cup"]
 
     init(model: CameraModel) {
         self.model = model
+        // Xcode가 yolo11n.mlpackage를 빌드 시 yolo11n.mlmodelc로 컴파일해 번들에 넣는다
+        yolo = Bundle.main.url(forResource: "yolo11n", withExtension: "mlmodelc")
+            .flatMap { try? MLModel(contentsOf: $0) }
+            .flatMap { try? VNCoreMLModel(for: $0) }
+            .map {
+                let r = VNCoreMLRequest(model: $0)
+                r.imageCropAndScaleOption = .scaleFit  // 잘라내지 않고 여백 → 박스 좌표가 원본 기준
+                return r
+            }
+        if yolo == nil {
+            Task { @MainActor [weak model] in model?.report("YOLO 모델 로드 실패 — QR만 인식") }
+        }
     }
 
     func onFrame(_ frame: VideoFrame) {
@@ -175,17 +191,29 @@ nonisolated final class FrameProcessor: @unchecked Sendable {
             let request = VNDetectBarcodesRequest()
             request.symbologies = [.qr]
             let handler = VNImageRequestHandler(cmSampleBuffer: frame.sampleBuffer, orientation: .up)
-            let error: Error?
-            do { try handler.perform([request]); error = nil } catch let e { error = e }
+            var error: Error?
+            // QR과 YOLO를 따로 재서 어느 쪽이 지연을 만드는지 CSV에서 구분
+            let qrStart = CACurrentMediaTime()
+            do { try handler.perform([request]) } catch let e { error = e }
+            let qrDone = CACurrentMediaTime()
+            if let yolo {
+                do { try handler.perform([yolo]) } catch let e { error = e }
+            }
             let done = CACurrentMediaTime()
             lock.withLock { busy = false }
 
-            let results = (request.results ?? []).map {
-                QRResult(value: $0.payloadStringValue ?? "?", confidence: $0.confidence, box: $0.boundingBox)
+            let qr = (request.results ?? []).map {
+                Detection(isQR: true, value: $0.payloadStringValue ?? "?", confidence: $0.confidence, box: $0.boundingBox)
             }
+            let objects = (yolo?.results ?? []).compactMap { $0 as? VNRecognizedObjectObservation }
+                .filter { Self.yoloLabels.contains($0.labels.first?.identifier ?? "") }
+                // labels[].confidence는 클래스 분포라 거의 1.0. 실제 검출 점수는 observation.confidence
+                .map { Detection(isQR: false, value: $0.labels[0].identifier, confidence: $0.confidence, box: $0.boundingBox) }
+            let results = qr + objects
             let latency = (done - arrived) * 1000
-            csv.write(t: arrived, fps: fps, latencyMs: latency, results: results)
-            Task { @MainActor [weak model] in
+            csv.write(t: arrived, fps: fps, latencyMs: latency, results: results,
+                      qrMs: (qrDone - qrStart) * 1000, yoloMs: yolo == nil ? nil : (done - qrDone) * 1000)
+            Task { @MainActor [weak model, error] in
                 model?.results = results
                 model?.latencyMs = latency
                 if let error { model?.report("Vision 실패: \(error)") }
@@ -198,20 +226,28 @@ nonisolated final class FrameProcessor: @unchecked Sendable {
 nonisolated final class MetricsCSV {
     private let handle: FileHandle?
 
+    private static let header = "t_ms,event,fps,latency_ms,detail,qr_ms,yolo_ms\n"
+
     init() {
+        let fm = FileManager.default
         let url = URL.documentsDirectory.appending(path: "metrics.csv")
-        if !FileManager.default.fileExists(atPath: url.path()) {
-            FileManager.default.createFile(atPath: url.path(), contents: Data("t_ms,event,fps,latency_ms,detail\n".utf8))
+        // 열 구성이 바뀐 이전 파일은 지우지 않고 옆으로 옮긴다
+        if let old = try? String(contentsOf: url, encoding: .utf8), !old.hasPrefix(Self.header) {
+            try? fm.moveItem(at: url, to: URL.documentsDirectory.appending(path: "metrics-old-\(Int(Date().timeIntervalSince1970)).csv"))
+        }
+        if !fm.fileExists(atPath: url.path()) {
+            fm.createFile(atPath: url.path(), contents: Data(Self.header.utf8))
         }
         handle = try? FileHandle(forWritingTo: url)
         _ = try? handle?.seekToEnd()
     }
 
     /// Vision 큐(직렬)에서만 호출.
-    func write(t: CFTimeInterval, fps: Int, latencyMs: Double, results: [QRResult]) {
+    func write(t: CFTimeInterval, fps: Int, latencyMs: Double, results: [Detection], qrMs: Double, yoloMs: Double?) {
         let detail = results.map { "\($0.value.replacingOccurrences(of: "\"", with: "\"\"")):\(String(format: "%.2f", $0.confidence))" }
             .joined(separator: ";")
-        let line = String(format: "%.1f,camera_frame,%d,%.1f,\"%@\"\n", t * 1000, fps, latencyMs, detail)
+        let yolo = yoloMs.map { String(format: "%.1f", $0) } ?? ""
+        let line = String(format: "%.1f,camera_frame,%d,%.1f,\"%@\",%.1f,%@\n", t * 1000, fps, latencyMs, detail, qrMs, yolo)
         try? handle?.write(contentsOf: Data(line.utf8))
     }
 }

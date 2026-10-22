@@ -22,14 +22,15 @@ struct CameraView: View {
 
                     ForEach(model.results) { qr in
                         let rect = viewRect(normalized: qr.box, imageSize: image.size, viewSize: geo.size)
+                        let color: Color = qr.isQR ? .green : .orange
                         Rectangle()
-                            .stroke(.green, lineWidth: 3)
+                            .stroke(color, lineWidth: 3)
                             .frame(width: rect.width, height: rect.height)
                             .offset(x: rect.minX, y: rect.minY)
                         Text("\(qr.value) \(qr.confidence, format: .number.precision(.fractionLength(2)))")
                             .font(.caption.bold())
                             .padding(2)
-                            .background(.green)
+                            .background(color)
                             .foregroundStyle(.black)
                             .offset(x: rect.minX, y: max(rect.minY - 20, 0))
                     }
