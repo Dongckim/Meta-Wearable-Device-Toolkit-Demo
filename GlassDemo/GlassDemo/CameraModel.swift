@@ -65,7 +65,7 @@ final class CameraModel {
     @ObservationIgnored private var engine = DecisionEngine()
     @ObservationIgnored private var gripTracker = GripTracker()
     @ObservationIgnored private var smoother = LandmarkSmoother()
-    @ObservationIgnored private var trackedWrist: CGPoint?  // 두 손 중 같은 손을 계속 따라가려고
+    @ObservationIgnored private var trackedCenter: CGPoint?  // 두 손 중 같은 손을 계속 따라가려고
     @ObservationIgnored private var missingFrames = 0
     static let decideDegrees = 25.0  // 누적 회전이 이보다 크면 방향을 판정
     static let warningCooldown: CFTimeInterval = 5
@@ -303,36 +303,47 @@ final class CameraModel {
             return
         }
         missingFrames = 0
-        let smoothed = smoother.smooth(hand.points)
-        trackedWrist = smoothed[0] ?? trackedWrist
+        trackedCenter = Self.center(hand) ?? trackedCenter
         let size = image?.size ?? CGSize(width: 1, height: 1)
-        let pixels = smoothed.map { $0.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) } }
+        func toPixels(_ points: [CGPoint?]) -> [CGPoint?] { points.map { $0.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) } } }
+        let raw = toPixels(hand.points)
         let wasGripped = grip?.gripped ?? false
-        let r = gripTracker.update(points: pixels, band: gripCalibration.band, at: t)
+        let r = gripTracker.update(points: toPixels(smoother.smooth(hand.points)), raw: raw, band: gripCalibration.band, at: t)
         grip = r
         if r.gripped != wasGripped { report(r.gripped ? "gripped" : "released") }
+        // pts = 평균 전 관절 픽셀(오프라인 재생·튜닝용), 관절 순서는 HandPose.joints
+        let pts = raw.map { $0.map { String(format: "%.0f;%.0f", $0.x, $0.y) } ?? "" }.joined(separator: "|")
         MetricsCSV.shared.row("grip", t: t, label: r.gripped ? "gripped" : "open", latencyMs: latencyMs,
-                              detail: String(format: "index=%@ angle=%@ w=%@ acc=%.1f",
-                                             Self.fmt(r.gripIndex, "%.3f"), Self.fmt(r.angle, "%.1f"), Self.fmt(r.angularVelocity, "%.1f"), r.accumulated))
+                              detail: String(format: "index=%@ angle=%@ w=%@ acc=%.1f hands=%d pts=%@",
+                                             Self.fmt(r.gripIndex, "%.3f"), Self.fmt(r.angle, "%.1f"), Self.fmt(r.angularVelocity, "%.1f"), r.accumulated,
+                                             poses.count, pts))
         updateCalibration(r, at: t)
         judgeTurn(r, at: t)
     }
 
     private static func fmt(_ v: Double?, _ f: String) -> String { v.map { String(format: f, $0) } ?? "" }
 
-    /// 이전에 따라가던 손(손목이 가장 가까운 손)을 계속 쓴다. 처음에는 오른손, 없으면 첫 번째 손.
+    /// 이전에 따라가던 손(보인 관절 중심이 가장 가까운 손)을 계속 쓴다. 처음에는 오른손, 없으면 첫 번째 손.
+    /// 손목 기준이면 손목이 안 보일 때 거리가 무한대라 아무 손이나 골랐다.
     private func trackedHand(in poses: [HandPose]) -> HandPose? {
-        guard let trackedWrist else { return poses.first { $0.isRight == true } ?? poses.first }
+        guard let trackedCenter else { return poses.first { $0.isRight == true } ?? poses.first }
         return poses.min { a, b in
-            func d(_ h: HandPose) -> CGFloat { h[.wrist].map { hypot($0.x - trackedWrist.x, $0.y - trackedWrist.y) } ?? .infinity }
+            func d(_ h: HandPose) -> CGFloat { Self.center(h).map { hypot($0.x - trackedCenter.x, $0.y - trackedCenter.y) } ?? .infinity }
             return d(a) < d(b)
         }
+    }
+
+    private static func center(_ hand: HandPose) -> CGPoint? {
+        let seen = hand.points.compactMap { $0 }
+        guard !seen.isEmpty else { return nil }
+        let n = CGFloat(seen.count)
+        return CGPoint(x: seen.reduce(0) { $0 + $1.x } / n, y: seen.reduce(0) { $0 + $1.y } / n)
     }
 
     private func resetGrip() {
         gripTracker.reset()
         smoother.reset()
-        trackedWrist = nil
+        trackedCenter = nil
         missingFrames = 0
         grip = nil
         turnState = .none
