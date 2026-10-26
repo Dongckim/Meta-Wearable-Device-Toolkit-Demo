@@ -73,6 +73,26 @@ struct GlassDemoTests {
         #expect(abs(small.accumulated - (-40)) < 0.1)
     }
 
+    /// 실기기 오경보: 쥔 뒤 손목이 안 잡혀 쥠 지표가 비는 동안, 손을 놓으며 되돌린 각도가 "쥔 채 푼 것"으로 쌓였다.
+    @Test func gripDoesNotAccumulateWithoutGripIndex() {
+        var tracker = GripTracker()
+        var t = 0.0, angle = 0.0
+        for _ in 0..<3 {
+            t += 1.0 / 15
+            _ = tracker.update(points: hand(angle: 0, spread: 20), band: band, at: t)
+        }
+        var r: GripTracker.Reading!
+        for _ in 0..<10 {
+            angle += 5
+            t += 1.0 / 15
+            var p = hand(angle: angle, spread: 20)
+            p[0] = nil  // 손목 없음 → 쥠 지표 nil, 각도는 있음
+            r = tracker.update(points: p, band: band, at: t)
+        }
+        #expect(r.gripped)  // 상태는 유지
+        #expect(r.accumulated == 0)
+    }
+
     @Test func landmarkSmootherAveragesLastFiveFrames() {
         var smoother = LandmarkSmoother()
         var out: [CGPoint?] = []

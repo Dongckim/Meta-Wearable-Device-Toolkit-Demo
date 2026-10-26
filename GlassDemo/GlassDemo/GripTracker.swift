@@ -114,7 +114,7 @@ nonisolated struct GripTracker {
             if d > 180 { d -= 360 } else if d < -180 { d += 360 }
             let v = d / (t - lastTime)
             velocity = v
-            if gripped, abs(v) >= minSpeed { segment += d }
+            if gripped, index != nil, abs(v) >= minSpeed { segment += d }  // 쥠을 확인 못 한 프레임(손목 안 보임 등)은 세지 않는다
         }
         lastAngle = angle
         if angle != nil { lastTime = t }
