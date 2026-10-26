@@ -10,6 +10,7 @@ import MWDATCore
 import Observation
 import QuartzCore
 import UIKit
+import Vision
 
 /// Vision 정규화 좌표 → aspect-fill로 그린 이미지 위의 SwiftUI 좌표(좌상단 원점).
 func viewRect(normalized r: CGRect, imageSize: CGSize, viewSize: CGSize) -> CGRect {
@@ -28,6 +29,9 @@ enum DetectorKind: String {
 
 @Observable
 final class CameraModel {
+    /// false = YOLO/QR 대신 손 관절 인식을 돌린다. 통화 모드는 인식 결과 대신 사진을 모델에 직접 보낸다.
+    nonisolated static let detectionEnabled = false
+
     var image: UIImage?
     var results: [Detection] = []
     var fps = 0
@@ -38,6 +42,12 @@ final class CameraModel {
     var stableConfidence: Float?
     var decision: DecisionEngine.Decision?
     var isSpeaking = false
+    /// 손 관절(화면 그리기용)과 쥠·회전 판정(GripTracker). grip이 nil이면 판정할 손이 없다.
+    var hands: [HandPose] = []
+    var grip: GripTracker.Reading?
+    var turnState = TurnState.none
+    var gripCalibration = GripCalibration.load()
+    var calibration: CalibrationRun?
     /// 글래스 쪽 세션/스트림 상태. 안경다리 한 번 탭 = 일시정지/재개, 길게 누르기 = 세션 종료.
     var sessionState: DeviceSessionState?
     var streamState: StreamState?
@@ -49,10 +59,28 @@ final class CameraModel {
 
     var log: (String) -> Void = { _ in }
     var speak: (String) -> Void = { _ in }
+    /// 안정된 인식 결과가 바뀔 때마다(판단과 같은 시점). 통화 모드가 "감지되었다" 안내에 쓴다.
+    var onStableChange: (String, Float?) -> Void = { _, _ in }
 
     @ObservationIgnored private var engine = DecisionEngine()
+    @ObservationIgnored private var gripTracker = GripTracker()
+    @ObservationIgnored private var smoother = LandmarkSmoother()
+    @ObservationIgnored private var trackedWrist: CGPoint?  // 두 손 중 같은 손을 계속 따라가려고
+    @ObservationIgnored private var missingFrames = 0
+    static let decideDegrees = 25.0  // 누적 회전이 이보다 크면 방향을 판정
+    static let warningCooldown: CFTimeInterval = 5
+    static let holdSeconds = 3.0  // 보정: 쥔 채로 / 편 채로
+    static let turnCalibrationDegrees = 360.0  // 보정: 한 바퀴 돌면 자동으로 끝
+    static let handLostFrames = 5  // 이만큼 연속 손이 없으면 사라진 것(한두 프레임 놓침은 무시)
+    static let wrongTurnWarning = "You're turning it the wrong way."
+    @ObservationIgnored private var lastWarning: CFTimeInterval = -.infinity
     @ObservationIgnored private let coreML: CoreMLDetector? = try? CoreMLDetector()
-    @ObservationIgnored private lazy var processor = FrameProcessor(model: self, detector: detector(for: detectorKind))
+    /// 학습용 프레임 저장(데이터 수집 모드). 영상 표시·인식과 따로 돈다.
+    @ObservationIgnored let dataset = DatasetCollector()
+    @ObservationIgnored private lazy var processor = FrameProcessor(model: self, detector: detector(for: detectorKind),
+                                                                    datasetWriter: dataset.writer)
+    @ObservationIgnored private var photoWaiter: CheckedContinuation<Data?, Never>?
+    @ObservationIgnored private var photoRequest = 0
     private var session: DeviceSession?
     private var camera: Camera?
     // 리스너가 self를 강하게 잡는다. stop()에서 tokens를 비워 순환을 끊는다.
@@ -99,7 +127,38 @@ final class CameraModel {
         }
     }
 
+    /// 영상 프레임은 블루투스 대역폭에 맞춰 많이 압축되므로, 모델에 보낼 때는 스틸 사진을 따로 찍는다.
+    /// 스트림 중에만 된다. timeout 안에 안 오면 nil.
+    func capturePhoto(timeout: Duration = .seconds(2)) async -> Data? {
+        resumePhoto(nil)  // 앞 요청이 남아 있으면 끝낸다
+        guard let stream = camera?.stream, stream.capturePhoto(format: .jpeg) else {
+            report("capturePhoto → not available")
+            return nil
+        }
+        photoRequest += 1
+        let request = photoRequest
+        let started = CACurrentMediaTime()
+        let data = await withCheckedContinuation { continuation in
+            photoWaiter = continuation
+            Task {
+                try? await Task.sleep(for: timeout)
+                if photoRequest == request { resumePhoto(nil) }
+            }
+        }
+        let ms = (CACurrentMediaTime() - started) * 1000
+        MetricsCSV.shared.row("photo", t: started, latencyMs: ms, detail: data.map { "\($0.count) bytes" } ?? "timeout")
+        report(data.map { String(format: "photo %d KB in %.0f ms", $0.count / 1024, ms) } ?? "photo timeout")
+        return data
+    }
+
+    private func resumePhoto(_ data: Data?) {
+        photoWaiter?.resume(returning: data)
+        photoWaiter = nil
+    }
+
     func stop() {
+        resumePhoto(nil)
+        if dataset.isRecording { dataset.toggleTake() }  // 영상이 끊기면 테이크도 끝낸다
         camera?.stream.stop()
         session?.stop()
         tokens.clear()
@@ -111,6 +170,10 @@ final class CameraModel {
         streamState = nil
         image = nil
         results = []
+        hands = []
+        resetGrip()
+        calibration = nil
+        lastWarning = -.infinity
         fps = 0
         MetricsCSV.shared.row("demo_stop", t: CACurrentMediaTime())
     }
@@ -145,7 +208,12 @@ final class CameraModel {
         case .started:
             guard camera == nil, let session else { return }  // pause 후 다시 started가 와도 한 번만
             do {
-                let config = StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: 15)
+                // 통화 모드에서는 HFP 음성이 같은 블루투스를 나눠 써서 영상이 밀린다 → 해상도를 낮춘다.
+                // 돌리는 방향은 프레임 사이 움직임으로 보므로 fps는 15를 유지한다.
+                let config = callActive
+                    ? StreamConfiguration(videoCodec: .raw, resolution: .low, frameRate: 15)
+                    : StreamConfiguration(videoCodec: .raw, resolution: .medium, frameRate: 15)
+                report("stream config: \(callActive ? "low / 15fps (call)" : "medium / 15fps")")
                 guard let camera = try session.addCamera(config: config) else {
                     return report("addCamera → nil")
                 }
@@ -157,6 +225,9 @@ final class CameraModel {
                 }.store(in: tokens)
                 stream.errorPublisher.listen { error in
                     Task { @MainActor in self.report("stream error: \(error)") }
+                }.store(in: tokens)
+                stream.photoDataPublisher.listen { photo in
+                    Task { @MainActor in self.resumePhoto(photo.data) }
                 }.store(in: tokens)
                 stream.videoFramePublisher.listen { frame in
                     processor.onFrame(frame)
@@ -198,6 +269,7 @@ final class CameraModel {
         stableLabel = label
         stableConfidence = top?.confidence
         self.decision = decision
+        onStableChange(label, top?.confidence)
 
         let detail: String
         switch decision {
@@ -218,6 +290,130 @@ final class CameraModel {
         }
     }
 
+    func didTrackHands(_ poses: [HandPose], arrived t: CFTimeInterval, latencyMs: Double) {
+        hands = poses
+        self.latencyMs = latencyMs
+        guard let hand = trackedHand(in: poses) else {
+            missingFrames += 1
+            if missingFrames >= Self.handLostFrames, grip != nil {
+                resetGrip()  // 손이 화면에서 사라지면 누적을 0으로
+                report("hand lost → reset")
+            }
+            MetricsCSV.shared.row("grip", t: t, label: "no_hand", latencyMs: latencyMs)
+            return
+        }
+        missingFrames = 0
+        let smoothed = smoother.smooth(hand.points)
+        trackedWrist = smoothed[0] ?? trackedWrist
+        let size = image?.size ?? CGSize(width: 1, height: 1)
+        let pixels = smoothed.map { $0.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) } }
+        let wasGripped = grip?.gripped ?? false
+        let r = gripTracker.update(points: pixels, band: gripCalibration.band, at: t)
+        grip = r
+        if r.gripped != wasGripped { report(r.gripped ? "gripped" : "released") }
+        MetricsCSV.shared.row("grip", t: t, label: r.gripped ? "gripped" : "open", latencyMs: latencyMs,
+                              detail: String(format: "index=%@ angle=%@ w=%@ acc=%.1f",
+                                             Self.fmt(r.gripIndex, "%.3f"), Self.fmt(r.angle, "%.1f"), Self.fmt(r.angularVelocity, "%.1f"), r.accumulated))
+        updateCalibration(r, at: t)
+        judgeTurn(r, at: t)
+    }
+
+    private static func fmt(_ v: Double?, _ f: String) -> String { v.map { String(format: f, $0) } ?? "" }
+
+    /// 이전에 따라가던 손(손목이 가장 가까운 손)을 계속 쓴다. 처음에는 오른손, 없으면 첫 번째 손.
+    private func trackedHand(in poses: [HandPose]) -> HandPose? {
+        guard let trackedWrist else { return poses.first { $0.isRight == true } ?? poses.first }
+        return poses.min { a, b in
+            func d(_ h: HandPose) -> CGFloat { h[.wrist].map { hypot($0.x - trackedWrist.x, $0.y - trackedWrist.y) } ?? .infinity }
+            return d(a) < d(b)
+        }
+    }
+
+    private func resetGrip() {
+        gripTracker.reset()
+        smoother.reset()
+        trackedWrist = nil
+        missingFrames = 0
+        grip = nil
+        turnState = .none
+    }
+
+    /// 누적 회전이 25°를 넘으면 방향 판정. 조이는 방향이면 조용히, 푸는 방향이면 경고(쿨다운 5초) 후 누적 초기화.
+    private func judgeTurn(_ r: GripTracker.Reading, at t: CFTimeInterval) {
+        guard calibration == nil, let sign = gripCalibration.tightenSign, abs(r.accumulated) > Self.decideDegrees else {
+            turnState = .none
+            return
+        }
+        let tightening = (r.accumulated > 0) == (sign > 0)
+        let previous = turnState
+        turnState = tightening ? .tightening : .loosening
+        if turnState != previous { report(String(format: "%@ %+.0f°", turnState.rawValue, r.accumulated)) }
+        guard !tightening, t - lastWarning > Self.warningCooldown else { return }
+        lastWarning = t
+        MetricsCSV.shared.row("warning", t: t, label: "loosening", detail: String(format: "acc=%.1f %@", r.accumulated, Self.wrongTurnWarning))
+        speak(Self.wrongTurnWarning)
+        gripTracker.clearAccumulation()
+    }
+
+    // MARK: - 쥠 보정
+
+    func startCalibration(_ step: CalibrationRun.Step) {
+        if step == .turn {
+            guard gripCalibration.band != nil else { return report("calibration: record grip and open first") }
+            gripTracker.clearAccumulation()
+        }
+        calibration = CalibrationRun(step: step)
+        report("calibration: \(step.rawValue)")
+    }
+
+    func cancelCalibration() {
+        calibration = nil
+        report("calibration cancelled")
+    }
+
+    /// 회전 단계: 그동안 누적된 각도의 부호를 조이는 방향으로 저장한다.
+    func finishTurnCalibration() {
+        let accumulated = gripTracker.accumulated
+        calibration = nil
+        guard abs(accumulated) > Self.decideDegrees else {
+            return report(String(format: "calibration: turned only %.0f°, try again", accumulated))
+        }
+        gripCalibration.tightenSign = accumulated > 0 ? 1 : -1
+        gripCalibration.save()
+        gripTracker.clearAccumulation()
+        report(String(format: "calibration: tighten = %@ (%+.0f°)", accumulated > 0 ? "angle +" : "angle −", accumulated))
+    }
+
+    private func updateCalibration(_ r: GripTracker.Reading, at t: CFTimeInterval) {
+        guard var run = calibration else { return }
+        switch run.step {
+        case .grip, .open:
+            guard let index = r.gripIndex else { return }
+            let started = run.started ?? t
+            run.started = started
+            run.samples.append(index)
+            run.progress = min((t - started) / Self.holdSeconds, 1)
+            if run.progress >= 1 {
+                let mean = run.samples.reduce(0, +) / Double(run.samples.count)
+                if run.step == .grip { gripCalibration.grippedIndex = mean } else { gripCalibration.openIndex = mean }
+                gripCalibration.save()
+                calibration = nil
+                report(String(format: "calibration: %@ = %.3f (%d frames)", run.step == .grip ? "gripped" : "open", mean, run.samples.count))
+                if gripCalibration.grippedIndex != nil, gripCalibration.openIndex != nil, gripCalibration.band == nil {
+                    report("calibration: gripped value is not smaller than open value, record again")
+                }
+                return
+            }
+        case .turn:
+            run.progress = min(abs(r.accumulated) / Self.turnCalibrationDegrees, 1)
+            if run.progress >= 1 {
+                calibration = run
+                return finishTurnCalibration()
+            }
+        }
+        calibration = run
+    }
+
     func report(_ text: String) {
         log(text)
     }
@@ -231,10 +427,13 @@ nonisolated final class FrameProcessor: @unchecked Sendable {
     private var busy = false
     private var arrivals: [CFTimeInterval] = []
     private var detector: any Detector
+    private let handDetector = HandPoseDetector()
+    private let datasetWriter: DatasetWriter
 
-    init(model: CameraModel, detector: any Detector) {
+    init(model: CameraModel, detector: any Detector, datasetWriter: DatasetWriter) {
         self.model = model
         self.detector = detector
+        self.datasetWriter = datasetWriter
     }
 
     var detectorName: String { lock.withLock { detector.name } }
@@ -245,6 +444,7 @@ nonisolated final class FrameProcessor: @unchecked Sendable {
 
     func onFrame(_ frame: VideoFrame) {
         let arrived = CACurrentMediaTime()
+        datasetWriter.save(frame.sampleBuffer)  // 테이크 중이면 모든 프레임(인식이 건너뛰는 프레임 포함)
         let (fps, skip, detector) = lock.withLock {
             arrivals.append(arrived)
             arrivals.removeAll { $0 < arrived - 1 }
@@ -259,6 +459,18 @@ nonisolated final class FrameProcessor: @unchecked Sendable {
             model?.fps = fps
         }
         guard !skip else { return }  // 이전 인식이 안 끝났으면 이 프레임은 건너뛴다
+
+        guard CameraModel.detectionEnabled else {
+            queue.async { [self] in
+                let poses = (try? handDetector.detect(frame.sampleBuffer)) ?? []
+                let latency = (CACurrentMediaTime() - arrived) * 1000
+                lock.withLock { busy = false }
+                Task { @MainActor [weak model] in
+                    model?.didTrackHands(poses, arrived: arrived, latencyMs: latency)
+                }
+            }
+            return
+        }
 
         queue.async { [self] in
             let detections: [Detection]

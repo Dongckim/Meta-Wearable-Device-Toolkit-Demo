@@ -21,6 +21,9 @@ struct CameraView: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
 
+                    handOverlay(imageSize: image.size)
+                        .frame(width: geo.size.width, height: geo.size.height)
+
                     ForEach(model.results) { item in
                         let rect = viewRect(normalized: item.boundingBox, imageSize: image.size, viewSize: geo.size)
                         let color = Self.color(for: item.label)
@@ -47,7 +50,7 @@ struct CameraView: View {
                     .frame(width: geo.size.width, height: geo.size.height)
                 }
             }
-            .overlay(alignment: .bottomTrailing) { metricsBadge.padding(10) }
+            .overlay(alignment: .bottomTrailing) { if model.isRunning { metricsBadge.padding(12) } }
         }
         .clipShape(RoundedRectangle(cornerRadius: 18))
     }
@@ -58,6 +61,32 @@ struct CameraView: View {
         case "bowl": .red
         default: .yellow
         }
+    }
+
+    /// 손 관절 21개 + 뼈대. 엄지·검지 끝(돌리는 방향을 재는 두 점)은 하늘색으로 크게.
+    private func handOverlay(imageSize: CGSize) -> some View {
+        Canvas { context, size in
+            for hand in model.hands {
+                let points = hand.points.map { p in
+                    p.map { viewRect(normalized: CGRect(origin: $0, size: .zero), imageSize: imageSize, viewSize: size).origin }
+                }
+                var bones = Path()
+                for (a, b) in HandPose.bones {
+                    guard let pa = points[a], let pb = points[b] else { continue }
+                    bones.move(to: pa)
+                    bones.addLine(to: pb)
+                }
+                context.stroke(bones, with: .color(.white.opacity(0.85)), lineWidth: 2)
+                for (i, p) in points.enumerated() {
+                    guard let p else { continue }
+                    let measured = i == 4 || i == 8
+                    let r: CGFloat = measured ? 6 : HandPose.tips.contains(i) ? 4.5 : 3.5
+                    context.fill(Path(ellipseIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)),
+                                 with: .color(measured ? .cyan : .orange))
+                }
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     private var metricsBadge: some View {

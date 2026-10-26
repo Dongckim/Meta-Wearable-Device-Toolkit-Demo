@@ -11,6 +11,94 @@ import Testing
 
 struct GlassDemoTests {
 
+    /// 손 점 21개(픽셀). 엄지 끝(4)을 원점에 두고 검지 끝(8)을 angle° 방향 100px에, 나머지 손끝을 spread px에 둔다.
+    /// 손 크기(손목 0 → 중지 MCP 9) = 100px이라 쥠 지표 ≈ (100 + 3·spread) / 4 / 100.
+    private func hand(angle: Double, spread: Double) -> [CGPoint?] {
+        var p = [CGPoint?](repeating: nil, count: 21)
+        let a = angle * .pi / 180
+        p[0] = CGPoint(x: 0, y: -150)
+        p[9] = CGPoint(x: 0, y: -50)
+        p[4] = .zero
+        p[8] = CGPoint(x: cos(a) * 100, y: sin(a) * 100)
+        for tip in [12, 16, 20] { p[tip] = CGPoint(x: spread, y: 0) }
+        return p
+    }
+
+    // 쥔 값 0.4, 편 값 1.6 → 경계 1.0, 히스테리시스 ±0.18
+    private let band = GripCalibration(grippedIndex: 0.4, openIndex: 1.6).band
+
+    @Test func gripNeedsThreeFramesAndHysteresis() {
+        var tracker = GripTracker()
+        var t = 0.0
+        func step(_ spread: Double) -> Bool {
+            t += 1.0 / 15
+            return tracker.update(points: hand(angle: 0, spread: spread), band: band, at: t).gripped
+        }
+        #expect(!step(20))  // 지표 0.4: 쥠 후보 1프레임
+        #expect(!step(20))
+        #expect(step(20))  // 3프레임 연속 → 쥠
+        #expect(step(150))  // 지표 1.375(경계+폭 1.18 이상): 폄 후보지만 아직 쥠
+        #expect(step(115))  // 지표 1.11: 경계 안쪽 → 상태 유지, 후보 끊김
+        #expect(step(150))
+        #expect(step(150))
+        #expect(!step(150))  // 다시 3프레임 연속 → 폄
+    }
+
+    @Test func gripAccumulatesOnlyWhileGripped() {
+        var tracker = GripTracker()
+        var t = 0.0, angle = 0.0
+        func frames(_ n: Int, step: Double, spread: Double) -> GripTracker.Reading {
+            var r: GripTracker.Reading!
+            for _ in 0..<n {
+                angle += step
+                t += 1.0 / 15
+                r = tracker.update(points: hand(angle: angle, spread: spread), band: band, at: t)
+            }
+            return r
+        }
+        _ = frames(3, step: 0, spread: 20)  // 쥠 확정
+        let turned = frames(10, step: -5, spread: 20)  // 쥔 채로 -50°
+        #expect(abs(turned.accumulated + 50) < 0.1)
+        // 펴고 되돌리기 +50°: 누적하지 않고, 펴도 지우지 않는다(폄 확정까지 3프레임은 아직 쥠이라 첫 2스텝은 들어간다)
+        let released = frames(10, step: 5, spread: 150)
+        #expect(!released.gripped)
+        #expect(abs(released.accumulated - (-50 + 10)) < 0.1)
+        // 초당 10° 미만은 떨림 → 무시
+        _ = frames(3, step: 0, spread: 20)
+        let slow = frames(10, step: 0.5, spread: 20)  // 7.5°/s
+        #expect(abs(slow.accumulated - (-40)) < 0.1)
+        // 한 번 쥔 구간에서 10° 미만만 돌았으면 구간째 버린다
+        _ = frames(2, step: 3, spread: 20)  // +6°
+        let small = frames(4, step: 0, spread: 150)
+        #expect(abs(small.accumulated - (-40)) < 0.1)
+    }
+
+    @Test func landmarkSmootherAveragesLastFiveFrames() {
+        var smoother = LandmarkSmoother()
+        var out: [CGPoint?] = []
+        for x in [0.0, 10, 20, 30, 40, 50] { out = smoother.smooth([CGPoint(x: x, y: 0), nil]) }
+        #expect(out[0] == CGPoint(x: 30, y: 0))  // 10~50 평균
+        #expect(out[1] == nil)
+    }
+
+    @Test func wakeWordSplitsCallFromQuestion() {
+        #expect(RealtimeCall.parseWake("Hey Illini.") == (true, nil))
+        #expect(RealtimeCall.parseWake("hey illinois") == (true, nil))
+        #expect(RealtimeCall.parseWake("Hey Illini, what am I doing?") == (true, "what am i doing"))
+        #expect(RealtimeCall.parseWake("What am I holding?") == (false, nil))
+        #expect(RealtimeCall.parseWake("I went to Illinoisan Street") == (false, nil))
+        // 전사기가 잘못 적는 경우
+        #expect(RealtimeCall.parseWake("Hey Elini.") == (true, nil))
+        #expect(RealtimeCall.parseWake("Hey, Lainey, what is this?") == (true, "what is this"))
+        #expect(RealtimeCall.parseWake("hey ill ini") == (true, nil))
+        #expect(RealtimeCall.parseWake("Hey Illiny what time is it") == (true, "what time is it"))
+        // "hey" 없이 비슷한 단어만 있으면 호출이 아니다
+        #expect(RealtimeCall.parseWake("I'm willing to help") == (false, nil))
+        #expect(RealtimeCall.parseWake("Elaine is here") == (false, nil))
+        #expect(RealtimeCall.editDistance("elini", "illini") == 2)
+        #expect(RealtimeCall.editDistance("", "abc") == 3)
+    }
+
     @Test func visionBoxFlipsYAxis() {
         // 좌하단 1/4 영역 → SwiftUI에서는 아래쪽
         let r = viewRect(normalized: CGRect(x: 0, y: 0, width: 0.5, height: 0.25),
