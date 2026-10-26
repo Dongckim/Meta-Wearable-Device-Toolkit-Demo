@@ -3,7 +3,7 @@
 //  GlassDemo
 //
 //  손 추적만으로 뚜껑 돌리는 방향을 판정한다(마커 없음).
-//  쥔 상태에서만 손 관절 전체의 회전을 누적하므로, 손을 펴고 되돌리는 동작은 세지 않는다.
+//  쥔 상태에서만 엄지→검지 선의 각도 변화를 누적하므로, 손을 펴고 되돌리는 동작은 세지 않는다.
 //  쥠 경계와 조이는 방향은 보정 화면에서 사람마다 잰다(GripCalibration, UserDefaults).
 //
 
@@ -38,7 +38,7 @@ nonisolated struct GripCalibration: Codable, Equatable {
     var tightenSign: Double?
 
     static let hysteresisRatio = 0.15
-    private static let key = "gripCalibration"
+    private static let key = "gripCalibration.palm"  // 쥠 지표 단위가 바뀌어(손목 기준 → 손바닥 폭) 예전 값은 버린다
 
     var band: (boundary: Double, margin: Double)? {
         guard let grippedIndex, let openIndex, openIndex > grippedIndex else { return nil }
@@ -58,59 +58,40 @@ nonisolated struct GripTracker {
     struct Reading {
         let gripIndex: Double?
         let gripped: Bool
-        let angle: Double?  // 엄지→검지 선, 도(y 위 좌표). 표시용
-        let angularVelocity: Double?  // 도/초. 이전 프레임과 같이 보인 관절 전체의 회전(rotation)
+        let angle: Double?  // 엄지→검지 선, 도(y 위 좌표). 평균 전 점
+        let angularVelocity: Double?  // 도/초
         let accumulated: Double  // 확정된 쥠 구간 합 + 지금 쥔 구간
     }
 
     var minSpeed = 10.0  // 도/초. 이보다 느린 변화는 떨림
-    var maxSpeed = 800.0  // 도/초. 이보다 빠르면 관절이 튄 것(실기기 실제 회전은 ~650까지)
-    /// 한 프레임 쥠 지표 변화가 이보다 크면 손 모양이 바뀌는 중 → 회전을 세지 않는다.
-    /// 손을 펴기만 해도 관절 회전이 -27°쯤 나온다. 실기기에서 쥔 채 돌릴 때는 ±0.03, 놓을 때 0.06~0.15
-    var maxShapeChange = 0.05
+    var maxSpeed = 800.0  // 도/초. 이보다 빠르면 엄지·검지 점이 튄 것(실기기 실제 회전은 ~650까지, 튄 값은 1700~3400)
     var minSegment = 10.0  // 도. 한 번 쥔 구간에서 이보다 적게 돌았으면 통째로 버린다
     var confirmFrames = 3  // 쥠/폄이 바뀌려면 이만큼 연속 같은 판정
 
     private(set) var gripped = false
     private var pending: Bool?
     private var pendingCount = 0
-    private var lastRaw: [CGPoint?]?
-    private var lastShape: Double?  // lastRaw의 쥠 지표
+    private var lastAngle: Double?
     private var lastTime: Double = 0
     private var total = 0.0  // 끝난 쥠 구간들의 합
     private var segment = 0.0  // 지금 쥔 구간
     var accumulated: Double { total + segment }
 
-    /// 손 크기 = 손목 → 중지 MCP. 쥠 지표 = 엄지 끝과 나머지 네 손가락 끝 거리의 평균 / 손 크기.
+    /// 손 크기 = 손바닥 폭(검지 MCP → 약지 MCP). 쥠 지표 = 엄지 끝과 나머지 네 손가락 끝 거리의 평균 / 손 크기.
+    /// 손목 → 중지 MCP였을 때는 뚜껑을 쥐면 손목이 화면 밖이라(쥔 프레임의 15%만 보임) 지표가 거의 안 나왔다.
     /// 점은 픽셀 단위(정규화 좌표는 가로세로 비율이 달라 거리가 찌그러진다).
     static func gripIndex(_ p: [CGPoint?]) -> Double? {
-        guard let thumb = p[4], let wrist = p[0], let middleMCP = p[9] else { return nil }
-        let size = hypot(middleMCP.x - wrist.x, middleMCP.y - wrist.y)
+        guard let thumb = p[4], let indexMCP = p[5], let ringMCP = p[13] else { return nil }
+        let size = hypot(ringMCP.x - indexMCP.x, ringMCP.y - indexMCP.y)
         let tips = [8, 12, 16, 20].compactMap { p[$0] }
         guard size > 1, tips.count >= 2 else { return nil }
         return tips.map { Double(hypot($0.x - thumb.x, $0.y - thumb.y)) }.reduce(0, +) / Double(tips.count) / Double(size)
     }
 
+    /// 뚜껑은 손바닥이 아니라 손끝으로 굴려 돌린다 → 손 전체 회전(Kabsch)은 거의 안 움직이고 이 선이 돈다(실기기 비교).
     static func angle(_ p: [CGPoint?]) -> Double? {
         guard let thumb = p[4], let index = p[8] else { return nil }
         return atan2(index.y - thumb.y, index.x - thumb.x) * 180 / .pi
-    }
-
-    /// a → b 회전각(도, 반시계 +). 둘 다 보인 관절이 4개 이상일 때만. 2D Kabsch: 중심을 빼고 Σ외적, Σ내적의 atan2.
-    /// 점 하나가 튀거나 엄지·검지가 뒤바뀌어도 나머지 관절이 잡아 준다(두 점 선은 한 프레임에 180° 뒤집혔다).
-    static func rotation(from a: [CGPoint?], to b: [CGPoint?]) -> Double? {
-        let pairs = zip(a, b).compactMap { p, q in p.flatMap { p in q.map { (p, $0) } } }
-        guard pairs.count >= 4 else { return nil }
-        let n = CGFloat(pairs.count)
-        let ca = CGPoint(x: pairs.reduce(0) { $0 + $1.0.x } / n, y: pairs.reduce(0) { $0 + $1.0.y } / n)
-        let cb = CGPoint(x: pairs.reduce(0) { $0 + $1.1.x } / n, y: pairs.reduce(0) { $0 + $1.1.y } / n)
-        var cross = 0.0, dot = 0.0
-        for (p, q) in pairs {
-            let (ax, ay, bx, by) = (p.x - ca.x, p.y - ca.y, q.x - cb.x, q.y - cb.y)
-            cross += ax * by - ay * bx
-            dot += ax * bx + ay * by
-        }
-        return atan2(cross, dot) * 180 / .pi
     }
 
     /// points: 이동평균한 점(쥠 지표용). raw: 평균 전 점(회전용 — 평균하면 한 번 튄 점이 여러 프레임의 가짜 회전으로 퍼진다).
@@ -130,21 +111,21 @@ nonisolated struct GripTracker {
             }
         }
 
-        let shape = Self.gripIndex(raw)
+        let angle = Self.angle(raw)
         var velocity: Double?
-        if let lastRaw, t > lastTime, let d = Self.rotation(from: lastRaw, to: raw) {
+        if let angle, let lastAngle, t > lastTime {
+            var d = angle - lastAngle
+            if d > 180 { d -= 360 } else if d < -180 { d += 360 }
             let v = d / (t - lastTime)
             velocity = v
-            let reshaping = shape.flatMap { s in lastShape.map { abs(s - $0) > maxShapeChange } } ?? false
-            // 쥠을 확인 못 한 프레임(손목 안 보임 등), 튄 프레임, 손 모양이 바뀌는 프레임은 세지 않는다
-            if gripped, index != nil, !reshaping, abs(v) >= minSpeed, abs(v) <= maxSpeed { segment += d }
+            // 쥠을 확인 못 한 프레임과 튄 프레임은 세지 않는다
+            if gripped, index != nil, abs(v) >= minSpeed, abs(v) <= maxSpeed { segment += d }
         }
-        if raw.compactMap({ $0 }).count >= 4 {
-            lastRaw = raw
-            lastShape = shape
+        if let angle {
+            lastAngle = angle
             lastTime = t
         }
-        return Reading(gripIndex: index, gripped: gripped, angle: Self.angle(p), angularVelocity: velocity, accumulated: accumulated)
+        return Reading(gripIndex: index, gripped: gripped, angle: angle, angularVelocity: velocity, accumulated: accumulated)
     }
 
     private mutating func setGripped(_ value: Bool) {
@@ -166,7 +147,7 @@ nonisolated struct GripTracker {
 
     /// 손이 화면에서 사라졌을 때.
     mutating func reset() {
-        self = GripTracker(minSpeed: minSpeed, maxSpeed: maxSpeed, maxShapeChange: maxShapeChange, minSegment: minSegment, confirmFrames: confirmFrames)
+        self = GripTracker(minSpeed: minSpeed, maxSpeed: maxSpeed, minSegment: minSegment, confirmFrames: confirmFrames)
     }
 }
 
@@ -181,7 +162,8 @@ nonisolated enum TurnState: String {
 nonisolated struct CalibrationRun {
     enum Step: String, CaseIterable {
         case grip = "Hold the cap gripped (3 s)"
-        case open = "Hold your hand open (3 s)"
+        // 활짝 편 손으로 재면 경계가 너무 높아져, 다시 쥐려고 살짝 뗀 손도 "쥠"으로 남는다(replay에서 오경보)
+        case open = "Lift your fingers off the cap, as when re-gripping (3 s)"
         case turn = "Turn one full round, tightening"
     }
 

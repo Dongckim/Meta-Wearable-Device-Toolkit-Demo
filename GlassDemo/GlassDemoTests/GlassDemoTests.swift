@@ -12,16 +12,14 @@ import Testing
 struct GlassDemoTests {
 
     /// 손 점 21개(픽셀). 엄지 끝(4)을 원점에 두고 검지 끝(8)을 100px, 나머지 손끝을 spread px에 둔 뒤 손 전체를 angle°만큼 돌린다.
-    /// 손 크기(손목 0 → 중지 MCP 9) = 100px이라 쥠 지표 ≈ (100 + 3·spread) / 4 / 100.
+    /// 손 크기(손바닥 폭: 검지 MCP 5 → 약지 MCP 13) = 100px이라 쥠 지표 ≈ (100 + 3·spread) / 4 / 100.
     private func hand(angle: Double, spread: Double) -> [CGPoint?] {
         var p = [CGPoint?](repeating: nil, count: 21)
-        p[0] = CGPoint(x: 0, y: -150)
-        p[9] = CGPoint(x: 0, y: -50)
+        p[5] = CGPoint(x: -50, y: -50)
+        p[13] = CGPoint(x: 50, y: -50)
         p[4] = .zero
         p[8] = CGPoint(x: 100, y: 0)
-        p[12] = CGPoint(x: spread, y: 10)
-        p[16] = CGPoint(x: spread, y: 20)
-        p[20] = CGPoint(x: spread, y: 30)
+        for tip in [12, 16, 20] { p[tip] = CGPoint(x: spread, y: 0) }
         let a = angle * .pi / 180
         return p.map { $0.map { CGPoint(x: $0.x * cos(a) - $0.y * sin(a), y: $0.x * sin(a) + $0.y * cos(a)) } }
     }
@@ -65,22 +63,21 @@ struct GlassDemoTests {
         _ = frames(3, step: 0, spread: 20)  // 쥠 확정
         let turned = frames(10, step: -5, spread: 20)  // 쥔 채로 -50°
         #expect(abs(turned.accumulated + 50) < 0.1)
-        // 펴고 되돌리기 +50°: 누적하지 않고, 펴도 지우지 않는다. 폄 확정까지 3프레임 중 손 모양이 바뀌는 첫 프레임은 빼고
-        // 두 번째 스텝(+5°)만 들어간다
+        // 펴고 되돌리기 +50°: 누적하지 않고, 펴도 지우지 않는다(폄 확정까지 3프레임은 아직 쥠이라 첫 2스텝은 들어간다)
         let released = frames(10, step: 5, spread: 150)
         #expect(!released.gripped)
-        #expect(abs(released.accumulated - (-50 + 5)) < 0.1)
+        #expect(abs(released.accumulated - (-50 + 10)) < 0.1)
         // 초당 10° 미만은 떨림 → 무시
         _ = frames(3, step: 0, spread: 20)
         let slow = frames(10, step: 0.5, spread: 20)  // 7.5°/s
-        #expect(abs(slow.accumulated - (-45)) < 0.1)
+        #expect(abs(slow.accumulated - (-40)) < 0.1)
         // 한 번 쥔 구간에서 10° 미만만 돌았으면 구간째 버린다
         _ = frames(2, step: 3, spread: 20)  // +6°
         let small = frames(4, step: 0, spread: 150)
-        #expect(abs(small.accumulated - (-45)) < 0.1)
+        #expect(abs(small.accumulated - (-40)) < 0.1)
     }
 
-    /// 실기기 오경보: 쥔 뒤 손목이 안 잡혀 쥠 지표가 비는 동안, 손을 놓으며 되돌린 각도가 "쥔 채 푼 것"으로 쌓였다.
+    /// 실기기 오경보: 쥔 뒤 손바닥 관절이 안 잡혀 쥠 지표가 비는 동안, 손을 놓으며 되돌린 각도가 "쥔 채 푼 것"으로 쌓였다.
     @Test func gripDoesNotAccumulateWithoutGripIndex() {
         var tracker = GripTracker()
         var t = 0.0, angle = 0.0
@@ -93,39 +90,21 @@ struct GlassDemoTests {
             angle += 5
             t += 1.0 / 15
             var p = hand(angle: angle, spread: 20)
-            p[0] = nil  // 손목 없음 → 쥠 지표 nil, 각도는 있음
+            p[5] = nil  // 검지 MCP 없음 → 쥠 지표 nil, 각도는 있음
             r = update(&tracker, p, at: t)
         }
         #expect(r.gripped)  // 상태는 유지
         #expect(r.accumulated == 0)
     }
 
-    @Test func rotationUsesAllJointsAndIgnoresOneFlippedPoint() {
-        let a = hand(angle: 0, spread: 20)
-        #expect(abs(GripTracker.rotation(from: a, to: hand(angle: 30, spread: 20))! - 30) < 0.01)
-        // 검지 끝 하나만 반대편으로 튀어도(두 점 선이면 180°) 나머지 관절 덕분에 작게 나온다
-        var flipped = a
-        flipped[8] = CGPoint(x: -100, y: 0)
-        #expect(abs(GripTracker.rotation(from: a, to: flipped)!) < 45)
-        #expect(GripTracker.rotation(from: a, to: [CGPoint?](repeating: nil, count: 21)) == nil)
+    /// 쥠 지표는 손목 없이도 나온다(뚜껑을 쥐면 손목은 대개 화면 밖).
+    @Test func gripIndexWorksWithoutWrist() {
+        let p = hand(angle: 30, spread: 20)
+        #expect(p[0] == nil)
+        #expect(abs(GripTracker.gripIndex(p)! - 0.4) < 0.001)
     }
 
-    /// 쥔 채 손을 펴거나 오므리는 프레임은 돌지 않아도 관절 회전이 크게 나온다 → 세지 않는다.
-    @Test func gripIgnoresRotationWhileHandReshapes() {
-        var tracker = GripTracker()
-        var t = 0.0
-        for _ in 0..<3 {
-            t += 1.0 / 15
-            _ = update(&tracker, hand(angle: 0, spread: 20), at: t)
-        }
-        #expect(abs(GripTracker.rotation(from: hand(angle: 0, spread: 20), to: hand(angle: 0, spread: 60))!) > 5)
-        t += 1.0 / 15
-        let r = update(&tracker, hand(angle: 0, spread: 60), at: t)  // 지표 0.47 → 0.74: 아직 쥠
-        #expect(r.gripped)
-        #expect(r.accumulated == 0)
-    }
-
-    /// 실기기 오경보: 손 전체가 한 프레임에 180° 뒤집혀 보이는(관절이 튀는) 프레임은 세지 않는다.
+    /// 실기기 오경보: 엄지→검지 선이 한 프레임에 100~180° 뒤집히는(점이 튀는) 프레임은 세지 않는다.
     @Test func gripIgnoresImpossiblyFastRotation() {
         var tracker = GripTracker()
         var t = 0.0
@@ -137,6 +116,9 @@ struct GlassDemoTests {
         let r = update(&tracker, hand(angle: 150, spread: 20), at: t)  // 2250°/s
         #expect(r.gripped)
         #expect(r.accumulated == 0)
+        t += 1.0 / 15
+        let next = update(&tracker, hand(angle: 145, spread: 20), at: t)  // 튄 뒤에도 그 각도 기준으로 이어서 센다
+        #expect(abs(next.accumulated + 5) < 0.1)
     }
 
     @Test func landmarkSmootherAveragesLastFiveFrames() {
